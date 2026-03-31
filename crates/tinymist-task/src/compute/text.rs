@@ -2,7 +2,7 @@
 
 use core::fmt;
 use std::sync::Arc;
-use typst_html::{HtmlNode::*, tag};
+use typst_html::HtmlNode::*;
 
 use crate::ExportTextTask;
 use tinymist_std::error::prelude::*;
@@ -73,11 +73,11 @@ impl FullTextDigest<'_> {
             Tag(_) => Ok(()),
             Element(elem) => {
                 // Skips certain tags that do not contribute to text content.
-                if matches!(elem.tag, tag::style | tag::script) {
-                    Ok(())
-                } else {
+                // if matches!(elem.tag, tag::style | tag::script) {
+                //     Ok(())
+                // } else {
                     Self::export_element(f, elem)
-                }
+                // }
             }
             Text(t, _) => f.write_str(t.as_str()),
             Frame(frame) => Self::export_frame(f, &frame.inner),
