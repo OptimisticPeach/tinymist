@@ -5,8 +5,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::{editor::EditorActorRequest, render::RenderActorRequest};
 use crate::{
-    WsMessage,
-    actor::{editor::DocToSrcJumpResolveRequest, render::ResolveSpanRequest},
+    actor::{editor::DocToSrcJumpResolveRequest, render::{ClientRequest, ResolveSpanRequest}}, WsMessage
 };
 
 // pub type CursorPosition = DocumentPosition;
@@ -39,15 +38,21 @@ fn positions_req(event: &'static str, positions: Vec<DocumentPosition>) -> Strin
 pub struct WebviewActor<'a, C> {
     webview_websocket_conn: std::pin::Pin<&'a mut C>,
     svg_receiver: mpsc::UnboundedReceiver<Vec<u8>>,
+    pdf_receiver: mpsc::UnboundedReceiver<Vec<u8>>,
     mailbox: broadcast::Receiver<WebviewActorRequest>,
 
     broadcast_sender: broadcast::Sender<WebviewActorRequest>,
     editor_sender: mpsc::UnboundedSender<EditorActorRequest>,
     render_sender: broadcast::Sender<RenderActorRequest>,
+    client_requests: broadcast::Sender<ClientRequest>,
 }
 
 pub struct Channels {
     pub svg: (
+        mpsc::UnboundedSender<Vec<u8>>,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+    ),
+    pub pdf: (
         mpsc::UnboundedSender<Vec<u8>>,
         mpsc::UnboundedReceiver<Vec<u8>>,
     ),
@@ -61,23 +66,28 @@ where
     pub fn set_up_channels() -> Channels {
         Channels {
             svg: mpsc::unbounded_channel(),
+            pdf: mpsc::unbounded_channel(),
         }
     }
     pub fn new(
         websocket_conn: std::pin::Pin<&'a mut C>,
         svg_receiver: mpsc::UnboundedReceiver<Vec<u8>>,
+        pdf_receiver: mpsc::UnboundedReceiver<Vec<u8>>,
         broadcast_sender: broadcast::Sender<WebviewActorRequest>,
         mailbox: broadcast::Receiver<WebviewActorRequest>,
         editor_sender: mpsc::UnboundedSender<EditorActorRequest>,
         render_sender: broadcast::Sender<RenderActorRequest>,
+        client_requests: broadcast::Sender<ClientRequest>,
     ) -> Self {
         Self {
             webview_websocket_conn: websocket_conn,
             svg_receiver,
+            pdf_receiver,
             mailbox,
             broadcast_sender,
             editor_sender,
             render_sender,
+            client_requests
         }
     }
 
@@ -113,6 +123,12 @@ where
                     log::trace!("WebviewActor: received svg from renderer");
                     let _scope = typst_timing::TimingScope::new("webview_actor_send_svg");
                     self.webview_websocket_conn.send(WsMessage::Binary(svg.into()))
+                    .await.log_error("WebViewActor");
+                }
+                Some(pdf) = self.pdf_receiver.recv() => {
+                    log::trace!("WebviewActor: received pdf from renderer");
+                    let _scope = typst_timing::TimingScope::new("webview_actor_send_pdf");
+                    self.webview_websocket_conn.send(WsMessage::Binary(pdf.into()))
                     .await.log_error("WebViewActor");
                 }
                 Some(msg) = self.webview_websocket_conn.next() => {
@@ -169,6 +185,8 @@ where
                         if let Ok(path) = path {
                             self.render_sender.send(RenderActorRequest::WebviewResolveFrameLoc(path)).log_error("WebViewActor");
                         };
+                    } else if msg.starts_with("make-pdf") {
+                        self.client_requests.send(ClientRequest::MakePDF).log_error("WebViewActor");
                     } else {
                         let err = self.webview_websocket_conn.send(WsMessage::Text(format!("error, received unknown message: {msg}"))).await;
                         log::info!("WebviewActor: received unknown message from websocket: {msg} {err:?}");

@@ -139,22 +139,27 @@ impl Previewer {
                     .await
                     .log_error("SendInvertColor");
                 }
-                let actor::webview::Channels { svg } =
+                let actor::webview::Channels { svg, pdf } =
                     actor::webview::WebviewActor::<'_, C>::set_up_channels();
+                let (client_tx, client_rx) = broadcast::channel(1);
                 let webview_actor = actor::webview::WebviewActor::new(
                     conn,
                     svg.1,
+                    pdf.1,
                     h.webview_tx.clone(),
                     h.webview_tx.subscribe(),
                     h.editor_tx.clone(),
                     h.renderer_tx.clone(),
+                    client_tx
                 );
                 let render_actor = actor::render::RenderActor::new(
                     h.renderer_tx.subscribe(),
                     h.doc_sender.clone(),
                     h.editor_tx.clone(),
                     svg.0,
+                    pdf.0,
                     h.webview_tx,
+                    client_rx
                 );
                 tokio::spawn(render_actor.run());
                 let outline_render_actor = actor::render::OutlineRenderActor::new(

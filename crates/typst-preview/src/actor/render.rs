@@ -7,6 +7,7 @@ use reflexo_typst::debug_loc::{
 use reflexo_vec2svg::IncrSvgDocServer;
 use tinymist_std::typst::TypstDocument;
 use tokio::sync::{broadcast, mpsc};
+use typst::Document;
 
 use super::{editor::EditorActorRequest, webview::WebviewActorRequest};
 use crate::debug_loc::SpanInterner;
@@ -41,13 +42,20 @@ impl RenderActorRequest {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum ClientRequest {
+    MakePDF,
+}
+
 pub struct RenderActor {
     mailbox: broadcast::Receiver<RenderActorRequest>,
     view: Arc<parking_lot::RwLock<Option<Arc<dyn CompileView>>>>,
     renderer: IncrSvgDocServer,
     editor_conn_sender: mpsc::UnboundedSender<EditorActorRequest>,
     svg_sender: mpsc::UnboundedSender<Vec<u8>>,
+    pdf_sender: mpsc::UnboundedSender<Vec<u8>>,
     webview_sender: broadcast::Sender<WebviewActorRequest>,
+    client_requests: broadcast::Receiver<ClientRequest>
 }
 
 impl RenderActor {
@@ -56,7 +64,9 @@ impl RenderActor {
         view: Arc<parking_lot::RwLock<Option<Arc<dyn CompileView>>>>,
         editor_conn_sender: mpsc::UnboundedSender<EditorActorRequest>,
         svg_sender: mpsc::UnboundedSender<Vec<u8>>,
+        pdf_sender: mpsc::UnboundedSender<Vec<u8>>,
         webview_sender: broadcast::Sender<WebviewActorRequest>,
+        client_requests: broadcast::Receiver<ClientRequest>,
     ) -> Self {
         let mut res = Self {
             mailbox,
@@ -64,7 +74,9 @@ impl RenderActor {
             renderer: IncrSvgDocServer::default(),
             editor_conn_sender,
             svg_sender,
+            pdf_sender,
             webview_sender,
+            client_requests,
         };
         res.renderer.set_should_attach_debug_info(true);
         res
@@ -125,19 +137,34 @@ impl RenderActor {
     pub async fn run(mut self) {
         loop {
             let mut has_full_render = false;
+            let mut make_pdf = false;
             log::debug!("RenderActor: waiting for message");
-            match self.mailbox.recv().await {
-                Ok(msg) => {
-                    has_full_render |= self.process_message(msg).await;
+
+            tokio::select! {
+                mail = self.mailbox.recv() => match mail {
+                    Ok(msg) => {
+                        has_full_render |= self.process_message(msg).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        log::info!("RenderActor: no more messages");
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        log::info!("RenderActor: lagged message. Some events are dropped");
+                    }
+                },
+                client = self.client_requests.recv() => match client {
+                    Ok(ClientRequest::MakePDF) => make_pdf = true,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        log::info!("RenderActor: no more messages");
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        log::info!("RenderActor: lagged message. Some events are dropped");
+                    }
                 }
-                Err(broadcast::error::RecvError::Closed) => {
-                    log::info!("RenderActor: no more messages");
-                    break;
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    log::info!("RenderActor: lagged message. Some events are dropped");
-                }
-            }
+            } 
+            
             // read the queue to empty
             while let Ok(msg) = self.mailbox.try_recv() {
                 has_full_render |= self.process_message(msg).await;
@@ -156,6 +183,14 @@ impl RenderActor {
                 log::info!("RenderActor: svg_sender is dropped");
                 break;
             };
+
+            if make_pdf {
+                let data = self.render_pdf(&document);
+                let Ok(_) = self.pdf_sender.send(data) else {
+                    log::info!("RenderActor: svg_sender is dropped");
+                    break;
+                };
+            }
         }
         log::info!("RenderActor: exiting")
     }
@@ -170,6 +205,27 @@ impl RenderActor {
         } else {
             self.render_delta(document)
         }
+    }
+
+    fn render_pdf(&self, document: &TypstDocument) -> Vec<u8> {
+        let TypstDocument::Paged(document) = document else {
+            log::error!("RenderActor: Requested PDF for an HTML document!");
+
+            return vec![];
+        };
+
+        let data = match typst_pdf::pdf(document, &Default::default()) {
+            Ok(x) => x,
+            Err(e) => {
+                log::info!("RenderActor: PDF Compilation failed with {e:?}");
+                return vec![];
+            }
+        };
+
+        let title = document.info().title.as_ref().map(|v| v[..].as_bytes()).unwrap_or(&[]);
+
+        // TODO: properly encode title.
+        [&b"unofficial-pdf"[..], title, &[0][..], &data[..]].concat()
     }
 
     #[typst_macros::time]

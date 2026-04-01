@@ -31,7 +31,7 @@ typst.workspace = true
 typst-macros.workspace = true
 typst-timing.workspace = true
 typst-assets.workspace = true
-
+typst-pdf.workspace = true
 
 [features]
 
